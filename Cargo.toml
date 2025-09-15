@@ -8,7 +8,7 @@ rust-version = "1.77"
 
 [[bin]]
 name = "echokit"
-harness = false             # do not use the built in cargo test harness -> resolve rust-analyzer errors
+harness = false  # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
 [profile.release]
 opt-level = "s"
@@ -84,3 +84,6 @@ bindings_module = "esp_sr"
 component_dirs = ["components/hal_driver"]
 bindings_header = "components/hal_driver/wrapper.h"
 bindings_module = "hal_driver"
+
+[package.metadata.esp-idf-sys]
+esp_idf_tools_install_dir = "custom:/home/liuzf/.espressif"
