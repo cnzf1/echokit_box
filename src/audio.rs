@@ -8,6 +8,13 @@ use esp_idf_svc::sys::esp_sr;
 const SAMPLE_RATE: u32 = 16000;
 const PORT_TICK_PERIOD_MS: u32 = 1000 / esp_idf_svc::sys::configTICK_RATE_HZ;
 
+#[derive(Debug)]
+pub struct WakeWordResult {
+    pub detected: bool,
+    pub model_index: i32,
+    pub word_index: i32,
+}
+
 unsafe fn afe_init() -> (
     *mut esp_sr::esp_afe_sr_iface_t,
     *mut esp_sr::esp_afe_sr_data_t,
@@ -28,6 +35,20 @@ unsafe fn afe_init() -> (
     afe_config.vad_min_noise_ms = 500;
     afe_config.vad_mode = esp_sr::vad_mode_t_VAD_MODE_1;
     afe_config.agc_init = true;
+    afe_config.wakenet_init = true;
+
+    if !afe_config.wakenet_model_name.is_null() {
+        log::info!(
+            "wakenet_model_name in afe_config is: {:?}",
+            afe_config.wakenet_model_name
+        );
+    }
+    if !afe_config.wakenet_model_name_2.is_null() {
+        log::info!(
+            "wakenet_model_name_2 in afe_config is:{:?}",
+            afe_config.wakenet_model_name_2
+        );
+    }
 
     log::info!("{afe_config:?}");
 
@@ -57,6 +78,7 @@ unsafe impl Sync for AFE {}
 struct AFEResult {
     data: Vec<u8>,
     speech: bool,
+    wake_word_result: WakeWordResult,
 }
 
 impl AFE {
@@ -119,7 +141,16 @@ impl AFE {
             };
 
             let speech = vad_state == esp_sr::vad_state_t_VAD_SPEECH;
-            Ok(AFEResult { data, speech })
+            let wake_word_result = WakeWordResult {
+                detected: result.wakeup_state == esp_sr::wakenet_state_t_WAKENET_DETECTED,
+                model_index: result.wakenet_model_index,
+                word_index: result.wake_word_index,
+            };
+            Ok(AFEResult {
+                data,
+                speech,
+                wake_word_result,
+            })
         }
     }
 }
@@ -140,6 +171,7 @@ pub type PlayerTx = tokio::sync::mpsc::UnboundedSender<AudioData>;
 pub type PlayerRx = tokio::sync::mpsc::UnboundedReceiver<AudioData>;
 pub type MicTx = tokio::sync::mpsc::Sender<crate::app::Event>;
 
+#[cfg(feature = "boards")]
 pub async fn i2s_task_(
     i2s: I2S0,
     ws: AnyIOPin,
@@ -149,12 +181,15 @@ pub async fn i2s_task_(
     bclk: AnyIOPin,
     lrclk: AnyIOPin,
     dout: AnyIOPin,
-    (tx, rx): (MicTx, PlayerRx),
+    (event_tx, player_rx): (MicTx, PlayerRx),
 ) {
     let afe_handle = Arc::new(AFE::new());
     let afe_handle_ = afe_handle.clone();
-    let afe_r = std::thread::spawn(|| afe_worker(afe_handle_, tx));
-    let r = i2s_player_(i2s, ws, sck, din, i2s1, bclk, lrclk, dout, afe_handle, rx).await;
+    let afe_r = std::thread::spawn(|| afe_worker(afe_handle_, event_tx));
+    let r = i2s_player_(
+        i2s, ws, sck, din, i2s1, bclk, lrclk, dout, afe_handle, player_rx,
+    )
+    .await;
     if let Err(e) = r {
         log::error!("Error: {}", e);
     } else {
@@ -168,6 +203,7 @@ pub async fn i2s_task_(
     }
 }
 
+#[cfg(feature = "boards")]
 async fn i2s_player_(
     i2s: I2S0,
     ws: AnyIOPin,
@@ -178,7 +214,7 @@ async fn i2s_player_(
     lrclk: AnyIOPin,
     dout: AnyIOPin,
     afe_handle: Arc<AFE>,
-    mut rx: PlayerRx,
+    mut player_rx: PlayerRx,
 ) -> anyhow::Result<()> {
     let i2s_config = config::StdConfig::new(
         config::Config::default().auto_clear(true),
@@ -209,10 +245,10 @@ async fn i2s_player_(
 
     loop {
         let data = if speaking {
-            rx.recv().await
+            player_rx.recv().await
         } else {
             tokio::select! {
-                Some(data) = rx.recv() =>{
+                Some(data) = player_rx.recv() =>{
                     Some(data)
                 }
                 _ = async {} => {
@@ -278,6 +314,7 @@ async fn i2s_player_(
     // Ok(())
 }
 
+#[cfg(feature = "box")]
 pub async fn i2s_task(
     i2s: I2S0,
     bclk: AnyIOPin,
@@ -303,6 +340,7 @@ pub async fn i2s_task(
     }
 }
 
+#[cfg(feature = "box")]
 async fn i2s_player(
     i2s: I2S0,
     bclk: AnyIOPin,
@@ -310,7 +348,7 @@ async fn i2s_player(
     dout: AnyIOPin,
     ws: AnyIOPin,
     afe_handle: Arc<AFE>,
-    mut rx: PlayerRx,
+    mut player_rx: PlayerRx,
 ) -> anyhow::Result<()> {
     log::info!("PORT_TICK_PERIOD_MS = {}", PORT_TICK_PERIOD_MS);
     let i2s_config = config::StdConfig::new(
@@ -339,10 +377,10 @@ async fn i2s_player(
 
     loop {
         let data = if speaking {
-            rx.recv().await
+            player_rx.recv().await
         } else {
             tokio::select! {
-                Some(data) = rx.recv() =>{
+                Some(data) = player_rx.recv() =>{
                     Some(data)
                 }
                 _ = async {} => {
@@ -408,14 +446,35 @@ async fn i2s_player(
     // Ok(())
 }
 
-fn afe_worker(afe_handle: Arc<AFE>, tx: MicTx) -> anyhow::Result<()> {
+fn afe_worker(afe_handle: Arc<AFE>, event_tx: MicTx) -> anyhow::Result<()> {
     let mut speech = false;
+    let mut detected = false;
     loop {
         let result = afe_handle.fetch();
         if let Err(_e) = &result {
             continue;
         }
         let result = result.unwrap();
+
+        if result.wake_word_result.detected {
+            log::info!(
+                "wake_word_result.detected: {:?}",
+                result.wake_word_result.detected
+            );
+        }
+        if result.wake_word_result.detected && !detected {
+            detected = true;
+            log::info!("Wakeup word detected");
+            log::info!(
+                "model_index: {}, word_index: {}",
+                result.wake_word_result.model_index,
+                result.wake_word_result.word_index
+            );
+            event_tx
+                .blocking_send(crate::app::Event::WakeWordDetected(result.wake_word_result))
+                .map_err(|_| anyhow::anyhow!("Failed to send data"))?;
+        }
+
         if result.data.is_empty() {
             continue;
         }
@@ -423,16 +482,19 @@ fn afe_worker(afe_handle: Arc<AFE>, tx: MicTx) -> anyhow::Result<()> {
         if result.speech {
             speech = true;
             log::debug!("Speech detected, sending {} bytes", result.data.len());
-            tx.blocking_send(crate::app::Event::MicAudioChunk(result.data))
+            event_tx
+                .blocking_send(crate::app::Event::MicAudioChunk(result.data))
                 .map_err(|_| anyhow::anyhow!("Failed to send data"))?;
             continue;
         }
 
         if speech {
-            log::info!("Speech ended");
-            tx.blocking_send(crate::app::Event::MicAudioEnd)
-                .map_err(|_| anyhow::anyhow!("Failed to send data"))?;
             speech = false;
+            log::info!("Speech ended");
+            event_tx
+                .blocking_send(crate::app::Event::MicAudioEnd)
+                .map_err(|_| anyhow::anyhow!("Failed to send data"))?;
+            detected = false;
         }
     }
 }

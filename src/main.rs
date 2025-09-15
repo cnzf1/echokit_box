@@ -191,7 +191,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     let (evt_tx, evt_rx) = tokio::sync::mpsc::channel(64);
-    let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel();
+    let (player_tx, player_rx) = tokio::sync::mpsc::unbounded_channel();
 
     #[cfg(feature = "box")]
     let i2s_task = {
@@ -206,7 +206,7 @@ fn main() -> anyhow::Result<()> {
             din.into(),
             dout.into(),
             ws.into(),
-            (evt_tx.clone(), rx1),
+            (evt_tx.clone(), player_rx),
         )
     };
 
@@ -228,7 +228,7 @@ fn main() -> anyhow::Result<()> {
             bclk.into(),
             lrclk.into(),
             dout.into(),
-            (evt_tx.clone(), rx1),
+            (evt_tx.clone(), player_rx),
         )
     };
 
@@ -253,7 +253,7 @@ fn main() -> anyhow::Result<()> {
 
     let server = server.unwrap();
 
-    let ws_task = app::main_work(server, tx1, evt_rx, background_gif);
+    let ws_task = app::main_work(server, player_tx, evt_rx, background_gif);
 
     b.spawn(async move {
         loop {
