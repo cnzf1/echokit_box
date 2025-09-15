@@ -33,6 +33,14 @@ build_bin:
 write_bin:
 	espflash write-bin 0x00000 ./echokit.bin && espflash monitor
 
+# 唤醒词模型
+.PHONY: model
+model:
+	cd $(HOME)/esp/esp-sr && \
+	python model/movemodel.py -d1 test_apps/esp-sr/sdkconfig.ci.wn9_hilexin -d2 . -d3 ./build && \
+	espflash write-bin --baud 115200 0x710000 build/srmodels/srmodels.bin
+
+# 清理
 .PHONY: clean
 clean:
 	cargo clean
