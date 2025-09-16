@@ -152,9 +152,11 @@ pub async fn main_work<'d>(
     while let Some(evt) = select_evt(&mut evt_rx, &mut server).await {
         match evt {
             Event::WakeWordDetected(result) => {
-                log::info!("Received WakeWordDetected: {result:?}");
-                gui.state = format!("WakeWordDetected: {result:?}");
-                gui.display_flush().unwrap();
+                log::info!(
+                    "wake word detected, model {}, word {}",
+                    result.model_index,
+                    result.word_index
+                );
                 if state == State::Idle {
                     state = State::Listening;
                     gui.state = "监听...".to_string();
@@ -168,7 +170,7 @@ pub async fn main_work<'d>(
                     let _ = rx.await;
                 } else if state == State::Listening {
                     state = State::Idle;
-                    gui.state = "等待唤醒词".to_string();
+                    gui.state = "wake word,等待唤醒词".to_string();
                     gui.text = "等待唤醒词...".to_string();
                     gui.display_flush().unwrap();
 
@@ -183,15 +185,9 @@ pub async fn main_work<'d>(
                 log::info!("Received event: gaia | k0");
                 if state == State::Listening {
                     state = State::Idle;
-                    gui.state = "wake_word".to_string();
-                    gui.text = "wait for wake word".to_string();
+                    gui.state = "K0, 等待唤醒词".to_string();
+                    gui.text = "等待唤醒词...".to_string();
                     gui.display_flush().unwrap();
-
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    player_tx
-                        .send(AudioData::Hello(tx))
-                        .map_err(|e| anyhow::anyhow!("Error sending hello: {e:?}"))?;
-                    let _ = rx.await;
                 } else if state == State::Idle {
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     player_tx
@@ -199,8 +195,7 @@ pub async fn main_work<'d>(
                         .map_err(|e| anyhow::anyhow!("Error sending hello: {e:?}"))?;
                     let _ = rx.await;
                     state = State::Listening;
-                    gui.state = "wake_word".to_string();
-                    gui.text = "wake word detected".to_string();
+                    gui.state = "wake word, Listening...".to_string();
                     gui.display_flush().unwrap();
                 }
             }

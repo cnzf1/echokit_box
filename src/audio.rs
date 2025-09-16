@@ -36,6 +36,7 @@ unsafe fn afe_init() -> (
     afe_config.vad_mode = esp_sr::vad_mode_t_VAD_MODE_1;
     afe_config.agc_init = true;
     afe_config.wakenet_init = true;
+    afe_config.wakenet_mode = esp_sr::det_mode_t_DET_MODE_95;
 
     if !afe_config.wakenet_model_name.is_null() {
         log::info!(
@@ -216,6 +217,7 @@ async fn i2s_player_(
     afe_handle: Arc<AFE>,
     mut player_rx: PlayerRx,
 ) -> anyhow::Result<()> {
+    log::info!("run i2s_player_");
     let i2s_config = config::StdConfig::new(
         config::Config::default().auto_clear(true),
         config::StdClkConfig::from_sample_rate_hz(SAMPLE_RATE),
@@ -254,6 +256,7 @@ async fn i2s_player_(
                 _ = async {} => {
                     for _ in 0..10{
                         let n = rx_driver.read(&mut buf, 100 / PORT_TICK_PERIOD_MS)?;
+                        // log::info!("rx_driver read {n} bytes");
                         afe_handle.feed(&buf[..n]);
                     }
                     None
@@ -447,11 +450,13 @@ async fn i2s_player(
 }
 
 fn afe_worker(afe_handle: Arc<AFE>, event_tx: MicTx) -> anyhow::Result<()> {
+    log::info!("thread afe_worker");
     let mut speech = false;
     let mut detected = false;
     loop {
         let result = afe_handle.fetch();
-        if let Err(_e) = &result {
+        if let Err(e) = &result {
+            log::error!("afe_handle.fetch error: {e:?}");
             continue;
         }
         let result = result.unwrap();
@@ -470,9 +475,12 @@ fn afe_worker(afe_handle: Arc<AFE>, event_tx: MicTx) -> anyhow::Result<()> {
                 result.wake_word_result.model_index,
                 result.wake_word_result.word_index
             );
-            event_tx
+            if let Err(e) = event_tx
                 .blocking_send(crate::app::Event::WakeWordDetected(result.wake_word_result))
-                .map_err(|_| anyhow::anyhow!("Failed to send data"))?;
+                .map_err(|_| anyhow::anyhow!("Failed to send data"))
+            {
+                log::error!("Failed to send wake word event: {e:?}");
+            }
         }
 
         if result.data.is_empty() {
@@ -489,11 +497,11 @@ fn afe_worker(afe_handle: Arc<AFE>, event_tx: MicTx) -> anyhow::Result<()> {
         }
 
         if speech {
-            speech = false;
             log::info!("Speech ended");
             event_tx
                 .blocking_send(crate::app::Event::MicAudioEnd)
                 .map_err(|_| anyhow::anyhow!("Failed to send data"))?;
+            speech = false;
             detected = false;
         }
     }
